@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
+    "babel-preset-expo": "~57.0.0",
     "expo": "~57.0.10",
     "expo-background-fetch": "~57.0.7",
     "expo-dev-client": "~57.0.10",

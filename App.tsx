@@ -13,6 +13,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { sendMessageToAI } from './src/ai';
+import { initDatabase, getMessages } from './src/database';
+import { useKeyboard } from './src/hooks/useKeyboard';
 
 type Language = 'norwegian' | 'cebuanano' | 'english';
 type Screen = 'onboarding' | 'chat' | 'settings';
@@ -35,7 +37,38 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const keyboardHeight = useKeyboard();
   const flatListRef = useRef<FlatList>(null);
+
+  // Load chat history from SQLite on app open
+  useEffect(() => {
+    (async () => {
+      try {
+        await initDatabase();
+        const savedMessages = await getMessages(50);
+
+        if (savedMessages.length > 0) {
+          const uiMessages: Message[] = savedMessages
+            .slice()
+            .reverse()
+            .map((msg) => ({
+              id: msg.id.toString(),
+              role: msg.role === 'user' ? 'user' : 'assistant',
+              content: msg.content,
+            }));
+
+          const lastMsg = savedMessages[0];
+          const lastLang = lastMsg.language as Language;
+
+          setLanguage(lastLang);
+          setMessages(uiMessages);
+          setScreen('chat');
+        }
+      } catch (error) {
+        console.warn('Failed to load chat history:', error);
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     if (messages.length > 0) {
@@ -217,28 +250,24 @@ export default function App() {
       />
 
       {/* Input */}
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      >
-        <View style={styles.inputContainer}>
-          <TextInput
-            style={styles.input}
-            value={input}
-            onChangeText={setInput}
-            placeholder="Type a message..."
-            placeholderTextColor="#999"
-            multiline
-            maxLength={500}
-          />
-          <TouchableOpacity
-            style={[styles.sendButton, (!input.trim() || loading) && styles.sendButtonDisabled]}
-            onPress={sendMessage}
-            disabled={!input.trim() || loading}
-          >
-            <Text style={styles.sendButtonText}>Send</Text>
-          </TouchableOpacity>
-        </View>
-      </KeyboardAvoidingView>
+      <View style={[styles.inputContainer, { paddingBottom: keyboardHeight + 12 }]}>
+        <TextInput
+          style={styles.input}
+          value={input}
+          onChangeText={setInput}
+          placeholder="Type a message..."
+          placeholderTextColor="#999"
+          multiline
+          maxLength={500}
+        />
+        <TouchableOpacity
+          style={[styles.sendButton, (!input.trim() || loading) && styles.sendButtonDisabled]}
+          onPress={sendMessage}
+          disabled={!input.trim() || loading}
+        >
+          <Text style={styles.sendButtonText}>Send</Text>
+        </TouchableOpacity>
+      </View>
     </SafeAreaView>
   );
 }
