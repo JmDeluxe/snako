@@ -14,7 +14,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { sendMessageToAI } from './src/ai';
 import { initDatabase, getMessages, getSetting, saveSetting } from './src/database';
 import { CURRICULUM, getLesson, type Lesson, type Unit } from './src/curriculum';
-import { getCompletedLessons, getTotalXp, getStreak, completeLesson, getLessonPosition, saveLessonPosition } from './src/progress';
+import { getCompletedLessons, getTotalXp, getStreak, completeLesson, getLessonPosition, saveLessonPosition, recordWordResult, getStrongWords, getStrongWordsCount, STRONG_THRESHOLD } from './src/progress';
 import { getDeck, buildQuiz, buildQuizWithReview, matchesAnswer, XP_PER_LESSON, type Flashcard, type QuizQuestion } from './src/flashcards';
 import { useKeyboard } from './src/hooks/useKeyboard';
 import { useTheme, type ThemeMode } from './src/hooks/useTheme';
@@ -52,6 +52,7 @@ export default function App() {
   const [completedLessons, setCompletedLessons] = useState<Set<string>>(new Set());
   const [totalXp, setTotalXp] = useState(0);
   const [streak, setStreak] = useState(0);
+  const [strongWordsCount, setStrongWordsCount] = useState(0);
 
   // Lesson runner state
   const [activeLessonId, setActiveLessonId] = useState<string | null>(null);
@@ -113,6 +114,7 @@ export default function App() {
         }
 
         await refreshProgress();
+        await refreshStrongCount();
 
         setScreen(hasOnboarded === 'true' ? 'path' : 'welcome');
       } catch (error) {
@@ -158,6 +160,10 @@ export default function App() {
     setCompletedLessons(completed);
     setTotalXp(xp);
     setStreak(streakInfo.current);
+  }
+
+  async function refreshStrongCount(): Promise<void> {
+    setStrongWordsCount(await getStrongWordsCount());
   }
 
   function buildPath(): LessonNode[] {
@@ -217,12 +223,18 @@ export default function App() {
       const correct = matchesAnswer(typedAnswer, question.acceptedAnswers, question.options[question.answerIndex]);
       setAnswered({ correct });
       setQuizScore((prev) => ({ correct: prev.correct + (correct ? 1 : 0), total: prev.total + 1 }));
+      if (correct) {
+        recordWordResult(question.card, correct).catch(() => {});
+      }
       return;
     }
 
     const correct = selectedOption === question.answerIndex;
     setAnswered({ correct });
     setQuizScore((prev) => ({ correct: prev.correct + (correct ? 1 : 0), total: prev.total + 1 }));
+    if (correct) {
+      recordWordResult(question.card, correct).catch(() => {});
+    }
   }
 
   // Re-ask wrong answers at the end of the quiz (once per question)
@@ -246,9 +258,14 @@ export default function App() {
   async function finishLesson(): Promise<void> {
     if (!activeLessonId) return;
 
+    const score = quizScore.correct;
+    const total = quizScore.total;
+    // Recording is queued asynchronously; this read serializes behind it in the queue
+    await refreshStrongCount();
+
     // "Practice all words" run — score only, never touches progress
     if (isPracticeRun) {
-      setLessonResult({ xp: 0, score: quizScore.correct, total: quizScore.total, lessonComplete: true });
+      setLessonResult({ xp: 0, score, total, lessonComplete: true });
       setLessonPhase('done');
       return;
     }
@@ -262,15 +279,15 @@ export default function App() {
       await completeLesson(activeLessonId, xp);
       await saveLessonPosition(activeLessonId, 0);
       await refreshProgress();
-      setLessonResult({ xp, score: quizScore.correct, total: quizScore.total, lessonComplete: true });
+      setLessonResult({ xp, score, total, lessonComplete: true });
     } else {
       // Words remain — save position so it survives app restarts
       await saveLessonPosition(activeLessonId, nextStart);
       setStudyStart(nextStart);
       setLessonResult({
         xp: 0,
-        score: quizScore.correct,
-        total: quizScore.total,
+        score,
+        total,
         lessonComplete: false,
         wordsLeft: cards.length - nextStart,
       });
@@ -406,6 +423,9 @@ export default function App() {
           <View style={styles.statsRow}>
             <Text style={[styles.statText, { color: colors.textSecondary }]}>▲ {streak}</Text>
             <Text style={[styles.statText, { color: colors.textSecondary }]}>{totalXp} XP</Text>
+            <TouchableOpacity onPress={() => {}} style={styles.settingsButton}>
+              <Text style={[styles.statText, { color: colors.textSecondary }]}>Words ({strongWordsCount})</Text>
+            </TouchableOpacity>
             <TouchableOpacity onPress={() => setScreen('settings')} style={styles.settingsButton}>
               <Text style={[styles.settingsIcon, { color: colors.accent }]}>Settings</Text>
             </TouchableOpacity>
@@ -459,6 +479,32 @@ export default function App() {
               </View>
             );
           })}
+
+          {strongWordsCount >= STRONG_THRESHOLD && (
+            <TouchableOpacity
+              style={[styles.practiceCta, { borderColor: colors.accent, borderWidth: 2, marginBottom: 16 }]}
+              onPress={async () => {
+                const strong = await getStrongWords();
+                if (strong.length === 0) return;
+                setIsPracticeRun(true);
+                setQuiz(buildQuiz(strong, strong.length));
+                setQuizIndex(0);
+                setQuizScore({ correct: 0, total: 0 });
+                setAnswered(null);
+                setSelectedOption(null);
+                setTypedAnswer('');
+                setRetryIds(new Set());
+                setLessonResult(null);
+                setHintVisible(false);
+                setLessonPhase('quiz');
+                setScreen('lesson');
+              }}
+            >
+              <Text style={[styles.practiceCtaText, { color: colors.text }]}>
+                Practice your {strongWordsCount} strong words
+              </Text>
+            </TouchableOpacity>
+          )}
 
           <TouchableOpacity
             style={[styles.practiceCta, { borderColor: colors.accent, borderWidth: 2 }]}
@@ -643,10 +689,15 @@ export default function App() {
 
                 <View style={{ height: 24 }} />
                 <TouchableOpacity
-                  style={[styles.primaryButton, { backgroundColor: revealedCards.size === 0 ? colors.disabled : colors.accent }]}
-                  disabled={revealedCards.size === 0}
-                  onPress={() => {
-                    const completedCards = repeatEnabled ? cards.slice(0, studyStart) : [];
+                  style={[styles.primaryButton, { backgroundColor: colors.accent }]}
+                  onPress={async () => {
+                    // Review pool: strong-but-shaky words from ALL lessons when the
+                    // repeat toggle is on; falls back to this lesson's completed words
+                    let completedCards: Flashcard[] = [];
+                    if (repeatEnabled) {
+                      const strong = await getStrongWords();
+                      completedCards = strong.length > 0 ? strong : cards.slice(0, studyStart);
+                    }
                     setQuiz(repeatEnabled ? buildQuizWithReview(learningCards, completedCards) : buildQuiz(learningCards));
                     setQuizIndex(0);
                     setAnswered(null);
