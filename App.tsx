@@ -36,6 +36,24 @@ type LessonNode = {
   state: 'completed' | 'current' | 'locked';
 };
 
+// Pure-View back chevron — border trick (rotated corner) so it always
+// centers perfectly in the round back button, unlike the ‹ text glyph
+function BackGlyph({ color, size = 14 }: { color: string; size?: number }) {
+  return (
+    <View
+      style={{
+        width: size,
+        height: size,
+        borderLeftWidth: 2,
+        borderBottomWidth: 2,
+        borderColor: color,
+        borderRadius: 1,
+        transform: [{ rotate: '45deg' }],
+      }}
+    />
+  );
+}
+
 export default function App() {
   const { mode, setMode, colors, scheme, initialized } = useTheme();
   const [screen, setScreen] = useState<Screen>('welcome');
@@ -540,7 +558,7 @@ export default function App() {
 
         <View style={[styles.header, { backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
           <TouchableOpacity style={[styles.backButtonCircle, { borderColor: colors.border, backgroundColor: colors.surface }]} onPress={() => setScreen('path')}>
-            <Text style={[styles.backButton, { color: colors.text }]}>‹</Text>
+            <BackGlyph color={colors.text} />
           </TouchableOpacity>
           <Text style={[styles.headerTitle, { color: colors.text, fontSize: 18 }]} numberOfLines={1}>
             {found ? found.lesson.title : 'Lesson'}
@@ -981,7 +999,7 @@ export default function App() {
         <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
         <View style={[styles.header, { backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
           <TouchableOpacity style={[styles.backButtonCircle, { borderColor: colors.border, backgroundColor: colors.surface }]} onPress={() => setScreen('path')}>
-            <Text style={[styles.backButton, { color: colors.text }]}>‹</Text>
+            <BackGlyph color={colors.text} />
           </TouchableOpacity>
           <Text style={[styles.headerTitle, { color: colors.text }]}>Your words</Text>
         </View>
@@ -1058,7 +1076,7 @@ export default function App() {
         <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
         <View style={[styles.header, { backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
           <TouchableOpacity style={[styles.backButtonCircle, { borderColor: colors.border, backgroundColor: colors.surface }]} onPress={() => setScreen('path')}>
-            <Text style={[styles.backButton, { color: colors.text }]}>‹</Text>
+            <BackGlyph color={colors.text} />
           </TouchableOpacity>
           <Text style={[styles.headerTitle, { color: colors.text }]}>Settings</Text>
         </View>
@@ -1206,7 +1224,7 @@ export default function App() {
 
       <View style={[styles.header, { backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
         <TouchableOpacity style={[styles.backButtonCircle, { borderColor: colors.border, backgroundColor: colors.surface }]} onPress={() => setScreen('path')}>
-          <Text style={[styles.backButton, { color: colors.text }]}>‹</Text>
+          <BackGlyph color={colors.text} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
           <Text style={[styles.headerTitle, { color: colors.text, fontSize: 18 }]}>Practice</Text>
