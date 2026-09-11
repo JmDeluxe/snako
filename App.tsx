@@ -11,8 +11,8 @@ import {
   Animated,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { sendMessageToAI } from './src/ai';
-import { initDatabase, getMessages, getSetting, saveSetting } from './src/database';
+import { generateDrillSentence, checkDrillTranslation, type DrillSentence, type DrillFeedback } from './src/ai';
+import { initDatabase, getSetting, saveSetting } from './src/database';
 import { CURRICULUM, getLesson, type Lesson, type Unit } from './src/curriculum';
 import { getCompletedLessons, getTotalXp, getStreak, completeLesson, getLessonPosition, saveLessonPosition, recordWordResult, getStrongWords, getStrongWordsCount, getAllWordMastery, STRONG_THRESHOLD, type WordMasteryRow } from './src/progress';
 import { getDeck, buildQuiz, buildQuizWithReview, matchesAnswer, XP_PER_LESSON, type Flashcard, type QuizQuestion } from './src/flashcards';
@@ -22,12 +22,6 @@ import { spacing, radius, type } from './src/theme';
 import { scheduleCheckIns, cancelCheckIns, requestNotificationPermission } from './src/notifications';
 
 type Screen = 'welcome' | 'path' | 'lesson' | 'practice' | 'settings' | 'words';
-
-type Message = {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-};
 
 type LessonNode = {
   unit: Unit;
@@ -76,8 +70,8 @@ function SettingsGlyph({ color, size = 22 }: { color: string; size?: number }) {
   );
 }
 
-// Bottom navigation: top-level tabs (Learn = lesson dashboard, Practice = free
-// drills, Words = mastery lists). Pure-View glyphs keep icons pixel-centered.
+// Bottom navigation: top-level tabs (Learn = lesson dashboard, Chat = free
+// practice, Words = mastery lists). Pure-View glyphs keep icons pixel-centered.
 function NavGlyph({ type, color, size = 20 }: { type: 'learn' | 'chat' | 'words'; color: string; size?: number }) {
   if (type === 'learn') {
     return (
@@ -115,9 +109,7 @@ export default function App() {
   const { mode, setMode, colors, scheme, initialized } = useTheme();
   const [screen, setScreen] = useState<Screen>('welcome');
   const [isStartupLoading, setIsStartupLoading] = useState(true);
-  const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
-  const [loading, setLoading] = useState(false);
   const [checkInsEnabled, setCheckInsEnabled] = useState(false);
   const [defaultStudyCount, setDefaultStudyCount] = useState(5);
   const [repeatEnabled, setRepeatEnabled] = useState(false);
@@ -152,14 +144,13 @@ export default function App() {
   const keyboardHeight = useKeyboard();
   const flatListRef = useRef<FlatList>(null);
 
-  // Load chat history from SQLite on app open
+  // Load app state from SQLite on app open
   useEffect(() => {
     (async () => {
       try {
         await initDatabase();
 
         const hasOnboarded = await getSetting('has_onboarded');
-        const savedMessages = await getMessages(50);
         const savedCheckIns = await getSetting('checkins_enabled');
         const savedStudyCount = await getSetting('study_count');
         const savedRepeat = await getSetting('repeat_completed');
@@ -177,18 +168,6 @@ export default function App() {
           setRepeatEnabled(true);
         }
 
-        if (savedMessages && savedMessages.length > 0) {
-          const uiMessages: Message[] = savedMessages
-            .slice()
-            .reverse()
-            .map((msg) => ({
-              id: msg.id.toString(),
-              role: msg.role === 'user' ? 'user' : 'assistant',
-              content: msg.content,
-            }));
-          setMessages(uiMessages);
-        }
-
         await refreshProgress();
         await refreshStrongCount();
 
@@ -201,12 +180,6 @@ export default function App() {
       }
     })();
   }, []);
-
-  useEffect(() => {
-    if (messages.length > 0) {
-      flatListRef.current?.scrollToEnd({ animated: true });
-    }
-  }, [messages]);
 
   // Smooth progress bar: animate whenever quiz position changes
   useEffect(() => {
@@ -398,49 +371,96 @@ export default function App() {
     setLessonPhase('done');
   }
   const startPractice = () => {
-    if (messages.length === 0) {
-      setMessages([
-        {
-          id: Date.now().toString(),
-          role: 'assistant',
-          content: 'Hei! Hyggelig å møte deg! (Hi! Nice to meet you!) Hva vil du øve på i dag?',
-        },
-      ]);
-    }
     setScreen('practice');
   };
 
-  const sendMessage = async () => {
-    if (!input.trim() || loading) return;
+  // === AI SENTENCE DRILLS ===
+  type DrillTurn =
+    | { kind: 'drill'; drill: DrillSentence }
+    | { kind: 'answer'; content: string }
+    | { kind: 'feedback'; content: string; correct: boolean }
+    | { kind: 'error'; content: string };
+
+  const [drillTurns, setDrillTurns] = useState<DrillTurn[]>([]);
+  const [drill, setDrill] = useState<DrillSentence | null>(null);
+  const [drillPhase, setDrillPhase] = useState<'loading' | 'awaiting' | 'grading' | 'graded'>('loading');
+  const [drillStreak, setDrillStreak] = useState(0);
+  const [lastFeedback, setLastFeedback] = useState<DrillFeedback | null>(null);
+
+  const fetchNextDrill = async (): Promise<void> => {
+    setDrillPhase('loading');
+    setDrill(null);
+    setLastFeedback(null);
+    try {
+      const next = await generateDrillSentence();
+      setDrill(next);
+      setDrillPhase('awaiting');
+      setDrillTurns((prev) => [...prev, { kind: 'drill', drill: next }]);
+    } catch {
+      setDrillTurns((prev) => [
+        ...prev,
+        { kind: 'error', content: 'Kunne ikke koble til Snako. (Could not reach Snako.) Tap to try again.' },
+      ]);
+      setDrillPhase('graded');
+    }
+  };
+
+  const retryDrill = async (): Promise<void> => {
+    // Drop the error bubble and refetch
+    setDrillTurns((prev) => prev.filter((t) => t.kind !== 'error'));
+    await fetchNextDrill();
+  };
+
+  // Drill list grows as turns are added — keep the latest visible
+  useEffect(() => {
+    flatListRef.current?.scrollToEnd({ animated: true });
+  }, [drillTurns, drillPhase]);
+
+  // Pull the first drill sentence when the practice tab opens
+  useEffect(() => {
+    if (screen === 'practice' && drillTurns.length === 0 && drillPhase === 'loading') {
+      fetchNextDrill();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen]);
+
+  const submitDrillAnswer = async (): Promise<void> => {
+    const current = drill;
+    if (!current || !input.trim() || drillPhase !== 'awaiting') return;
 
     const userText = input.trim();
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      role: 'user',
-      content: userText,
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
     setInput('');
-    setLoading(true);
+    setDrillPhase('grading');
+    setDrillTurns((prev) => [...prev, { kind: 'answer', content: userText }]);
 
     try {
-      const aiResponse = await sendMessageToAI(userText);
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: aiResponse,
-      };
-      setMessages((prev) => [...prev, assistantMessage]);
-    } catch (error) {
-      const errorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: 'Beklager, noe gikk galt. Prøv igjen! (Sorry, something went wrong. Try again!)',
-      };
-      setMessages((prev) => [...prev, errorMessage]);
-    } finally {
-      setLoading(false);
+      const feedback = await checkDrillTranslation(current, userText);
+      setLastFeedback(feedback);
+      setDrillPhase('graded');
+      setDrillTurns((prev) => [
+        ...prev,
+        { kind: 'feedback', content: feedback.feedback, correct: feedback.correct },
+      ]);
+      // Every tracked word in the drill moves proficiency — drills are single-shot
+      for (const word of current.wordsUsed) {
+        recordWordResult(word, feedback.correct).catch(() => {});
+      }
+      await refreshStrongCount();
+      if (feedback.correct) {
+        setDrillStreak((s) => s + 1);
+        // Correct: roll straight into the next sentence
+        setTimeout(() => {
+          fetchNextDrill();
+        }, 1500);
+      } else {
+        setDrillStreak(0);
+      }
+    } catch {
+      setDrillPhase('graded');
+      setDrillTurns((prev) => [
+        ...prev,
+        { kind: 'error', content: 'Kunne ikke koble til Snako. (Could not reach Snako.) Tap to try again.' },
+      ]);
     }
   };
 
@@ -458,25 +478,53 @@ export default function App() {
     }
   };
 
-  const renderMessage = ({ item }: { item: Message }) => (
-    <View
-      style={[
-        styles.messageBubble,
-        item.role === 'user'
-          ? { backgroundColor: colors.bubbleUser, alignSelf: 'flex-end', borderBottomRightRadius: radius.sm }
-          : { backgroundColor: colors.bubbleAssistant, alignSelf: 'flex-start', borderBottomLeftRadius: radius.sm },
-      ]}
-    >
-      <Text
-        style={{
-          color: item.role === 'user' ? colors.bubbleUserText : colors.bubbleAssistantText,
-          fontSize: type.base,
-        }}
-      >
-        {item.content}
-      </Text>
-    </View>
-  );
+  const renderDrillTurn = ({ item }: { item: DrillTurn }) => {
+    if (item.kind === 'drill') {
+      // The sentence to translate — the star of the screen
+      return (
+        <View style={[styles.drillBubble, { backgroundColor: colors.surface, borderColor: colors.accent, borderWidth: 2 }]}>
+          <Text style={[styles.drillPromptLabel, { color: colors.textMuted }]}>
+            {item.drill.direction === 'no-to-en' ? 'What does this mean?' : 'Say this in Bokmål'}
+          </Text>
+          <Text style={[styles.drillSentence, { color: colors.text }]}>{item.drill.prompt}</Text>
+        </View>
+      );
+    }
+    if (item.kind === 'feedback') {
+      return (
+        <View
+          style={[
+            styles.messageBubble,
+            { backgroundColor: colors.bubbleAssistant, alignSelf: 'flex-start', borderBottomLeftRadius: radius.sm },
+            item.correct && { borderColor: colors.accent, borderWidth: 2 },
+          ]}
+        >
+          <Text style={{ color: colors.bubbleAssistantText, fontSize: type.base }}>
+            {item.correct ? '✓ ' : '✗ '}
+            {item.content}
+          </Text>
+          {!item.correct && lastFeedback && (
+            <Text style={[styles.drillExpected, { color: colors.textMuted }]}>
+              Correct answer: “{lastFeedback.correctTranslation}”
+            </Text>
+          )}
+        </View>
+      );
+    }
+    if (item.kind === 'error') {
+      return (
+        <TouchableOpacity onPress={retryDrill} style={[styles.messageBubble, { backgroundColor: colors.bubbleAssistant, alignSelf: 'flex-start', borderBottomLeftRadius: radius.sm }]}>
+          <Text style={[styles.typingIndicator, { color: colors.textMuted }]}>{item.content}</Text>
+        </TouchableOpacity>
+      );
+    }
+    // answer
+    return (
+      <View style={[styles.messageBubble, { backgroundColor: colors.bubbleUser, alignSelf: 'flex-end', borderBottomRightRadius: radius.sm }]}>
+        <Text style={{ color: colors.bubbleUserText, fontSize: type.base }}>{item.content}</Text>
+      </View>
+    );
+  };
 
   // === LOADING STATE ===
   if (!initialized || isStartupLoading) {
@@ -1285,7 +1333,7 @@ export default function App() {
     );
   }
 
-  // === PRACTICE (CHAT) SCREEN ===
+  // === PRACTICE (AI SENTENCE DRILLS) SCREEN ===
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]}>
       <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
@@ -1294,7 +1342,12 @@ export default function App() {
         <View style={{ flex: 1 }}>
           <Text style={[styles.headerTitle, { color: colors.text, fontSize: 18 }]}>Practice</Text>
           <Text style={[styles.headerSubtitle, { color: colors.textSecondary }]}>
-            Free conversation with Snako
+            Translate sentences built from your words
+          </Text>
+        </View>
+        <View style={[styles.streakChip, { borderColor: colors.border, backgroundColor: colors.surface }]}>
+          <Text style={[styles.streakChipText, { color: drillStreak > 0 ? colors.text : colors.textMuted }]}>
+            ✓ {drillStreak} på rad
           </Text>
         </View>
         <TouchableOpacity onPress={() => setScreen('settings')} style={styles.settingsButton}>
@@ -1304,19 +1357,21 @@ export default function App() {
 
       <FlatList
         ref={flatListRef}
-        data={messages}
-        renderItem={renderMessage}
-        keyExtractor={(item) => item.id}
+        data={drillTurns}
+        renderItem={renderDrillTurn}
+        keyExtractor={(item, idx) => `${idx}-${item.kind}`}
         contentContainerStyle={styles.messageList}
         ListFooterComponent={
-          loading ? (
+          drillPhase === 'loading' || drillPhase === 'grading' ? (
             <View
               style={[
                 styles.messageBubble,
                 { backgroundColor: colors.bubbleAssistant, alignSelf: 'flex-start', borderBottomLeftRadius: radius.sm },
               ]}
             >
-              <Text style={[styles.typingIndicator, { color: colors.textMuted }]}>Snako skriver…</Text>
+              <Text style={[styles.typingIndicator, { color: colors.textMuted }]}>
+                {drillPhase === 'loading' ? 'Snako tenner en ny setning…' : 'Snako sjekker…'}
+              </Text>
             </View>
           ) : null
         }
@@ -1327,7 +1382,7 @@ export default function App() {
           style={[styles.input, { backgroundColor: colors.surface, color: colors.text }]}
           value={input}
           onChangeText={setInput}
-          placeholder="Skriv en melding… (Type a message)"
+          placeholder={drill?.direction === 'en-to-no' ? 'Skriv på norsk…' : 'Translate to English…'}
           placeholderTextColor={colors.textMuted}
           multiline
           maxLength={500}
@@ -1335,13 +1390,31 @@ export default function App() {
         <TouchableOpacity
           style={[
             styles.sendButton,
-            { backgroundColor: (!input.trim() || loading) ? colors.disabled : colors.accent },
-            (!input.trim() || loading) && { borderWidth: 1, borderColor: colors.border }
+            {
+              backgroundColor:
+                (!input.trim() || drillPhase === 'grading' || drillPhase === 'loading') ? colors.disabled : colors.accent,
+            },
+            (!input.trim() || drillPhase === 'grading' || drillPhase === 'loading') && { borderWidth: 1, borderColor: colors.border },
           ]}
-          onPress={sendMessage}
-          disabled={!input.trim() || loading}
+          onPress={() => {
+            if (drillPhase === 'awaiting') {
+              submitDrillAnswer();
+            } else if (drillTurns.some((t) => t.kind === 'error')) {
+              retryDrill();
+            } else if (drillPhase === 'graded') {
+              fetchNextDrill();
+            }
+          }}
+          disabled={!input.trim() || drillPhase === 'grading' || drillPhase === 'loading'}
         >
-                  <Text style={[styles.sendButtonText, { color: (!input.trim() || loading) ? colors.textMuted : colors.bg }]}>Send</Text>
+          <Text
+            style={[
+              styles.sendButtonText,
+              { color: (!input.trim() || drillPhase === 'grading' || drillPhase === 'loading') ? colors.textMuted : colors.bg },
+            ]}
+          >
+            {drillPhase === 'awaiting' ? 'Check' : 'Next'}
+          </Text>
         </TouchableOpacity>
       </View>
 
@@ -1769,6 +1842,39 @@ const styles = StyleSheet.create({
   typingIndicator: {
     fontSize: type.sm,
     fontStyle: 'italic',
+  },
+  streakChip: {
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    marginRight: 4,
+  },
+  streakChipText: {
+    fontSize: type.xs,
+    fontWeight: '600',
+  },
+  drillBubble: {
+    alignSelf: 'flex-start',
+    maxWidth: '85%',
+    borderRadius: radius.lg,
+    padding: 14,
+    marginBottom: 10,
+    gap: 6,
+  },
+  drillPromptLabel: {
+    fontSize: type.xs,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+  },
+  drillSentence: {
+    fontSize: type.lg,
+    fontWeight: '600',
+    lineHeight: 26,
+  },
+  drillExpected: {
+    fontSize: type.xs,
+    marginTop: 4,
   },
   // Input
   inputContainer: {
