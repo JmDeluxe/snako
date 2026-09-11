@@ -14,14 +14,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { sendMessageToAI } from './src/ai';
 import { initDatabase, getMessages, getSetting, saveSetting } from './src/database';
 import { CURRICULUM, getLesson, type Lesson, type Unit } from './src/curriculum';
-import { getCompletedLessons, getTotalXp, getStreak, completeLesson, getLessonPosition, saveLessonPosition, recordWordResult, getStrongWords, getStrongWordsCount, STRONG_THRESHOLD } from './src/progress';
+import { getCompletedLessons, getTotalXp, getStreak, completeLesson, getLessonPosition, saveLessonPosition, recordWordResult, getStrongWords, getStrongWordsCount, getAllWordMastery, STRONG_THRESHOLD, type WordMasteryRow } from './src/progress';
 import { getDeck, buildQuiz, buildQuizWithReview, matchesAnswer, XP_PER_LESSON, type Flashcard, type QuizQuestion } from './src/flashcards';
 import { useKeyboard } from './src/hooks/useKeyboard';
 import { useTheme, type ThemeMode } from './src/hooks/useTheme';
 import { spacing, radius, type } from './src/theme';
 import { scheduleCheckIns, cancelCheckIns, requestNotificationPermission } from './src/notifications';
 
-type Screen = 'welcome' | 'path' | 'lesson' | 'practice' | 'settings';
+type Screen = 'welcome' | 'path' | 'lesson' | 'practice' | 'settings' | 'words';
 
 type Message = {
   id: string;
@@ -53,6 +53,7 @@ export default function App() {
   const [totalXp, setTotalXp] = useState(0);
   const [streak, setStreak] = useState(0);
   const [strongWordsCount, setStrongWordsCount] = useState(0);
+  const [masteryRows, setMasteryRows] = useState<WordMasteryRow[]>([]);
 
   // Lesson runner state
   const [activeLessonId, setActiveLessonId] = useState<string | null>(null);
@@ -164,6 +165,11 @@ export default function App() {
 
   async function refreshStrongCount(): Promise<void> {
     setStrongWordsCount(await getStrongWordsCount());
+  }
+
+  async function openWordsScreen(): Promise<void> {
+    setMasteryRows(await getAllWordMastery());
+    setScreen('words');
   }
 
   function buildPath(): LessonNode[] {
@@ -423,7 +429,7 @@ export default function App() {
           <View style={styles.statsRow}>
             <Text style={[styles.statText, { color: colors.textSecondary }]}>▲ {streak}</Text>
             <Text style={[styles.statText, { color: colors.textSecondary }]}>{totalXp} XP</Text>
-            <TouchableOpacity onPress={() => {}} style={styles.settingsButton}>
+            <TouchableOpacity onPress={openWordsScreen} style={styles.settingsButton}>
               <Text style={[styles.statText, { color: colors.textSecondary }]}>Words ({strongWordsCount})</Text>
             </TouchableOpacity>
             <TouchableOpacity onPress={() => setScreen('settings')} style={styles.settingsButton}>
@@ -948,6 +954,104 @@ export default function App() {
   }
 
   // === SETTINGS SCREEN ===
+  // === WORDS SCREEN ===
+  if (screen === 'words') {
+    const strong = masteryRows.filter((r) => r.correct_count >= STRONG_THRESHOLD);
+    const learning = masteryRows.filter((r) => r.correct_count < STRONG_THRESHOLD);
+
+    const practiceRows = async (rows: WordMasteryRow[]): Promise<void> => {
+      if (rows.length === 0) return;
+      const deck: Flashcard[] = rows.map((r) => ({ no: r.no, en: r.en }));
+      setIsPracticeRun(true);
+      setQuiz(buildQuiz(deck, deck.length));
+      setQuizIndex(0);
+      setQuizScore({ correct: 0, total: 0 });
+      setAnswered(null);
+      setSelectedOption(null);
+      setTypedAnswer('');
+      setRetryIds(new Set());
+      setLessonResult(null);
+      setHintVisible(false);
+      setLessonPhase('quiz');
+      setScreen('lesson');
+    };
+
+    return (
+      <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]}>
+        <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
+        <View style={[styles.header, { backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
+          <TouchableOpacity style={[styles.backButtonCircle, { borderColor: colors.border, backgroundColor: colors.surface }]} onPress={() => setScreen('path')}>
+            <Text style={[styles.backButton, { color: colors.text }]}>‹</Text>
+          </TouchableOpacity>
+          <Text style={[styles.headerTitle, { color: colors.text }]}>Your words</Text>
+        </View>
+
+        <ScrollView style={styles.settingsBody}>
+          <Text style={[styles.settingsSectionTitle, { color: colors.textMuted }]}>
+            Strong — you know these ({strong.length})
+          </Text>
+          {strong.length === 0 ? (
+            <Text style={[styles.wordsEmpty, { color: colors.textMuted }]}>
+              No strong words yet. Get {STRONG_THRESHOLD} correct answers on a word to mark it strong.
+            </Text>
+          ) : (
+            <TouchableOpacity
+              style={[styles.practiceCta, { borderColor: colors.accent, borderWidth: 2, marginBottom: 12 }]}
+              onPress={() => practiceRows(strong)}
+            >
+              <Text style={[styles.practiceCtaText, { color: colors.text }]}>
+                Practice {strong.length} strong {strong.length === 1 ? 'word' : 'words'}
+              </Text>
+            </TouchableOpacity>
+          )}
+          {strong.map((row) => (
+            <View key={row.no} style={[styles.wordRowCard, { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1 }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.wordRowNo, { color: colors.text }]} numberOfLines={1}>{row.no}</Text>
+                <Text style={[styles.wordRowEn, { color: colors.textSecondary }]} numberOfLines={1}>{row.en}</Text>
+              </View>
+              <View style={[styles.wordMeter, { backgroundColor: colors.surfaceAlt }]}>
+                <View style={[styles.wordMeterFill, { backgroundColor: colors.accent, width: `${Math.min(100, (row.correct_count / (STRONG_THRESHOLD + 4)) * 100)}%` }]} />
+              </View>
+              <Text style={[styles.wordScore, { color: colors.textMuted }]}>{row.correct_count}</Text>
+            </View>
+          ))}
+
+          <View style={{ height: 28 }} />
+          <Text style={[styles.settingsSectionTitle, { color: colors.textMuted }]}>
+            Needs work ({learning.length})
+          </Text>
+          {learning.length === 0 ? (
+            <Text style={[styles.wordsEmpty, { color: colors.textMuted }]}>
+              Nothing here — every word you have met is strong so far.
+            </Text>
+          ) : (
+            <TouchableOpacity
+              style={[styles.practiceCta, { borderColor: colors.accent, borderWidth: 2, marginBottom: 12 }]}
+              onPress={() => practiceRows(learning)}
+            >
+              <Text style={[styles.practiceCtaText, { color: colors.text }]}>
+                Practice {learning.length} {learning.length === 1 ? 'word' : 'words'} that need work
+              </Text>
+            </TouchableOpacity>
+          )}
+          {learning.map((row) => (
+            <View key={row.no} style={[styles.wordRowCard, { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1 }]}>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.wordRowNo, { color: colors.text }]} numberOfLines={1}>{row.no}</Text>
+                <Text style={[styles.wordRowEn, { color: colors.textSecondary }]} numberOfLines={1}>{row.en}</Text>
+              </View>
+              <View style={[styles.wordMeter, { backgroundColor: colors.surfaceAlt }]}>
+                <View style={[styles.wordMeterFill, { backgroundColor: colors.textMuted, width: `${Math.min(100, (row.correct_count / STRONG_THRESHOLD) * 100)}%` }]} />
+              </View>
+              <Text style={[styles.wordScore, { color: colors.textMuted }]}>{row.correct_count}</Text>
+            </View>
+          ))}
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
   if (screen === 'settings') {
     return (
       <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]}>
@@ -1472,6 +1576,43 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     marginBottom: 12,
     marginLeft: 4,
+  },
+  wordsEmpty: {
+    fontSize: type.sm,
+    marginLeft: 4,
+    marginBottom: 8,
+  },
+  wordRowCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderRadius: radius.md,
+    padding: 12,
+    marginBottom: 8,
+    gap: 10,
+  },
+  wordRowNo: {
+    fontSize: type.md,
+    fontWeight: '600',
+  },
+  wordRowEn: {
+    fontSize: type.xs,
+    marginTop: 2,
+  },
+  wordMeter: {
+    width: 56,
+    height: 6,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  wordMeterFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  wordScore: {
+    fontSize: type.xs,
+    fontWeight: '600',
+    width: 20,
+    textAlign: 'right',
   },
   settingsLangRow: {
     flexDirection: 'row',
