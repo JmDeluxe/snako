@@ -1,5 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, type ReactNode } from 'react';
 import {
   StyleSheet,
   Text,
@@ -51,6 +51,63 @@ function BackGlyph({ color, size = 14 }: { color: string; size?: number }) {
         transform: [{ rotate: '45deg' }],
       }}
     />
+  );
+}
+
+// Pure-View settings glyph — three horizontal dots (modern "more options" look)
+function SettingsGlyph({ color, size = 22 }: { color: string; size?: number }) {
+  const s = size;
+  const dot = s * 0.16;
+  return (
+    <View
+      style={{
+        width: s,
+        height: s,
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexDirection: 'row',
+        gap: s * 0.18,
+      }}
+    >
+      <View style={{ width: dot, height: dot, borderRadius: dot / 2, backgroundColor: color }} />
+      <View style={{ width: dot, height: dot, borderRadius: dot / 2, backgroundColor: color }} />
+      <View style={{ width: dot, height: dot, borderRadius: dot / 2, backgroundColor: color }} />
+    </View>
+  );
+}
+
+// Bottom navigation: top-level tabs (Learn = lesson dashboard, Practice = free
+// drills, Words = mastery lists). Pure-View glyphs keep icons pixel-centered.
+function NavGlyph({ type, color, size = 20 }: { type: 'learn' | 'chat' | 'words'; color: string; size?: number }) {
+  if (type === 'learn') {
+    return (
+      <View style={{ width: size, height: size, justifyContent: 'center', gap: size * 0.16 }}>
+        <View style={{ height: 2, borderRadius: 1, backgroundColor: color }} />
+        <View style={{ height: 2, width: size * 0.62, borderRadius: 1, backgroundColor: color }} />
+        <View style={{ height: 2, borderRadius: 1, backgroundColor: color }} />
+      </View>
+    );
+  }
+  if (type === 'chat') {
+    return (
+      <View
+        style={{
+          width: size,
+          height: size * 0.8,
+          borderRadius: size * 0.24,
+          borderWidth: 2,
+          borderColor: color,
+        }}
+      />
+    );
+  }
+  const bar = size * 0.14;
+  return (
+    <View style={{ width: size, height: size, justifyContent: 'center', alignItems: 'center', flexDirection: 'row', gap: size * 0.14 }}>
+      <View style={{ width: bar, height: size * 0.55, borderRadius: bar / 2, backgroundColor: color }} />
+      <View style={{ width: bar, height: size * 0.8, borderRadius: bar / 2, backgroundColor: color }} />
+      <View style={{ width: bar, height: size * 0.36, borderRadius: bar / 2, backgroundColor: color }} />
+    </View>
   );
 }
 
@@ -188,6 +245,28 @@ export default function App() {
   async function openWordsScreen(): Promise<void> {
     setMasteryRows(await getAllWordMastery());
     setScreen('words');
+  }
+
+  function renderBottomNav(active: 'path' | 'chat' | 'words'): ReactNode {
+    const tabs: { key: 'path' | 'chat' | 'words'; label: string; glyph: 'learn' | 'chat' | 'words'; onPress: () => void }[] = [
+      { key: 'path', label: 'Learn', glyph: 'learn', onPress: () => setScreen('path') },
+      { key: 'chat', label: 'Practice', glyph: 'chat', onPress: startPractice },
+      { key: 'words', label: 'Words', glyph: 'words', onPress: () => { openWordsScreen(); } },
+    ];
+    return (
+      <View style={[styles.bottomNav, { backgroundColor: colors.bg, borderTopColor: colors.border }]}>
+        {tabs.map((tab) => {
+          const isActive = tab.key === active;
+          const tint = isActive ? colors.accent : colors.textMuted;
+          return (
+            <TouchableOpacity key={tab.label} style={styles.bottomNavItem} onPress={tab.onPress}>
+              <NavGlyph type={tab.glyph} color={tint} />
+              <Text style={[styles.bottomNavLabel, { color: tint }]}>{tab.label}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+    );
   }
 
   function buildPath(): LessonNode[] {
@@ -447,11 +526,8 @@ export default function App() {
           <View style={styles.statsRow}>
             <Text style={[styles.statText, { color: colors.textSecondary }]}>▲ {streak}</Text>
             <Text style={[styles.statText, { color: colors.textSecondary }]}>{totalXp} XP</Text>
-            <TouchableOpacity onPress={openWordsScreen} style={styles.settingsButton}>
-              <Text style={[styles.statText, { color: colors.textSecondary }]}>Words ({strongWordsCount})</Text>
-            </TouchableOpacity>
             <TouchableOpacity onPress={() => setScreen('settings')} style={styles.settingsButton}>
-              <Text style={[styles.settingsIcon, { color: colors.accent }]}>Settings</Text>
+              <SettingsGlyph color={colors.text} />
             </TouchableOpacity>
           </View>
         </View>
@@ -529,16 +605,9 @@ export default function App() {
               </Text>
             </TouchableOpacity>
           )}
-
-          <TouchableOpacity
-            style={[styles.practiceCta, { borderColor: colors.accent, borderWidth: 2 }]}
-            onPress={startPractice}
-          >
-            <Text style={[styles.practiceCtaText, { color: colors.text }]}>
-              Free practice with Snako
-            </Text>
-          </TouchableOpacity>
         </ScrollView>
+
+        {renderBottomNav('path')}
       </SafeAreaView>
     );
   }
@@ -998,9 +1067,6 @@ export default function App() {
       <SafeAreaView style={[styles.container, { backgroundColor: colors.bg }]}>
         <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
         <View style={[styles.header, { backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
-          <TouchableOpacity style={[styles.backButtonCircle, { borderColor: colors.border, backgroundColor: colors.surface }]} onPress={() => setScreen('path')}>
-            <BackGlyph color={colors.text} />
-          </TouchableOpacity>
           <Text style={[styles.headerTitle, { color: colors.text }]}>Your words</Text>
         </View>
 
@@ -1066,6 +1132,8 @@ export default function App() {
             </View>
           ))}
         </ScrollView>
+
+        {renderBottomNav('words')}
       </SafeAreaView>
     );
   }
@@ -1223,9 +1291,6 @@ export default function App() {
       <StatusBar style={scheme === 'dark' ? 'light' : 'dark'} />
 
       <View style={[styles.header, { backgroundColor: colors.bg, borderBottomColor: colors.border }]}>
-        <TouchableOpacity style={[styles.backButtonCircle, { borderColor: colors.border, backgroundColor: colors.surface }]} onPress={() => setScreen('path')}>
-          <BackGlyph color={colors.text} />
-        </TouchableOpacity>
         <View style={{ flex: 1 }}>
           <Text style={[styles.headerTitle, { color: colors.text, fontSize: 18 }]}>Practice</Text>
           <Text style={[styles.headerSubtitle, { color: colors.textSecondary }]}>
@@ -1233,7 +1298,7 @@ export default function App() {
           </Text>
         </View>
         <TouchableOpacity onPress={() => setScreen('settings')} style={styles.settingsButton}>
-          <Text style={[styles.settingsIcon, { color: colors.accent }]}>Settings</Text>
+          <SettingsGlyph color={colors.text} />
         </TouchableOpacity>
       </View>
 
@@ -1276,9 +1341,11 @@ export default function App() {
           onPress={sendMessage}
           disabled={!input.trim() || loading}
         >
-          <Text style={[styles.sendButtonText, { color: (!input.trim() || loading) ? colors.textMuted : colors.bg }]}>Send</Text>
+                  <Text style={[styles.sendButtonText, { color: (!input.trim() || loading) ? colors.textMuted : colors.bg }]}>Send</Text>
         </TouchableOpacity>
       </View>
+
+      {renderBottomNav('chat')}
     </SafeAreaView>
   );
 }
@@ -1286,6 +1353,22 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+  },
+  bottomNav: {
+    flexDirection: 'row',
+    borderTopWidth: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
+  },
+  bottomNavItem: {
+    flex: 1,
+    alignItems: 'center',
+    gap: 3,
+    paddingVertical: 6,
+  },
+  bottomNavLabel: {
+    fontSize: type.xs,
+    fontWeight: '600',
   },
   // Welcome
   onboarding: {
@@ -1378,9 +1461,6 @@ const styles = StyleSheet.create({
   },
   settingsButton: {
     padding: 8,
-  },
-  settingsIcon: {
-    fontSize: 22,
   },
   // Path
   pathBody: {
