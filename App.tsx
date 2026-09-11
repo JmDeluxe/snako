@@ -70,7 +70,7 @@ export default function App() {
   const progressAnim = useRef(new Animated.Value(0)).current;
   const cardAnim = useRef(new Animated.Value(0)).current;
   const [quizScore, setQuizScore] = useState({ correct: 0, total: 0 });
-  const [lessonResult, setLessonResult] = useState<null | { xp: number; score: number; total: number; lessonComplete: boolean }>(null);
+  const [lessonResult, setLessonResult] = useState<null | { xp: number; score: number; total: number; lessonComplete: boolean; wordsLeft?: number }>(null);
 
   const keyboardHeight = useKeyboard();
   const flatListRef = useRef<FlatList>(null);
@@ -248,8 +248,7 @@ export default function App() {
 
     // "Practice all words" run — score only, never touches progress
     if (isPracticeRun) {
-      setIsPracticeRun(false);
-      setLessonResult({ xp: 0, score: quizScore.correct, total: quizScore.total, lessonComplete: false });
+      setLessonResult({ xp: 0, score: quizScore.correct, total: quizScore.total, lessonComplete: true });
       setLessonPhase('done');
       return;
     }
@@ -273,6 +272,7 @@ export default function App() {
         score: quizScore.correct,
         total: quizScore.total,
         lessonComplete: false,
+        wordsLeft: cards.length - nextStart,
       });
     }
     setLessonPhase('done');
@@ -817,12 +817,14 @@ export default function App() {
               {lessonResult.lessonComplete ? 'Leksjon fullført!' : 'Bra jobbet!'}
             </Text>
             <Text style={[styles.resultXp, { color: colors.textSecondary }]}>
-              {lessonResult.score}/{lessonResult.total} on the quiz
+              {lessonResult.total > 0
+                ? `${Math.round((lessonResult.score / lessonResult.total) * 100)}% correct`
+                : 'Quiz complete'}
               {lessonResult.xp > 0 ? ` · +${lessonResult.xp} XP` : ''}
             </Text>
-            {!lessonResult.lessonComplete && (
+            {typeof lessonResult.wordsLeft === 'number' && lessonResult.wordsLeft > 0 && (
               <Text style={[styles.selectSub, { color: colors.textMuted, marginTop: 8, textAlign: 'center' }]}>
-                {cards.length - studyStart} words left in this lesson
+                {lessonResult.wordsLeft} words left in this lesson
               </Text>
             )}
             <TouchableOpacity
