@@ -1,4 +1,5 @@
 import { initDatabase, enqueue } from './database';
+import type { Flashcard } from './flashcards';
 
 export type LessonProgress = {
   lessonId: string;
@@ -35,6 +36,13 @@ async function ensureProgressTables(): Promise<void> {
     CREATE TABLE IF NOT EXISTS lesson_position (
       lesson_id TEXT PRIMARY KEY,
       pos INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS word_mastery (
+      word_no TEXT PRIMARY KEY,
+      word_en TEXT NOT NULL,
+      correct_count INTEGER NOT NULL DEFAULT 0,
+      wrong_count INTEGER NOT NULL DEFAULT 0,
+      last_seen_at INTEGER NOT NULL DEFAULT 0
     );
     INSERT OR IGNORE INTO streak (id, current, last_active_date) VALUES (1, 0, NULL);
   `);
@@ -155,5 +163,84 @@ export async function getLessonCache(lessonId: string): Promise<string | null> {
       [lessonId]
     );
     return row?.exercises_json ?? null;
+  });
+}
+
+// A word is "strong" once it has survived 3 first-try correct answers.
+// A wrong answer subtracts 1 (floor 0) so words fall out of the pool until re-earned.
+export const STRONG_THRESHOLD = 3;
+
+export async function recordWordResult(card: Flashcard, correct: boolean): Promise<void> {
+  return enqueueProgress(async () => {
+    await ensureProgressTables();
+    const db = await initDatabase();
+    await db.runAsync(
+      `INSERT INTO word_mastery (word_no, word_en, correct_count, wrong_count, last_seen_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(word_no) DO UPDATE SET
+         correct_count = MAX(
+           correct_count + ?,
+           0
+         ),
+         wrong_count = wrong_count + ?,
+         last_seen_at = ?`,
+      [
+        card.no,
+        card.en,
+        correct ? 1 : 0,
+        correct ? 0 : 1,
+        Date.now(),
+        correct ? 1 : -1,
+        correct ? 0 : 1,
+        Date.now(),
+      ]
+    );
+  });
+}
+
+// All strong words, weakest first — review should hit the shakiest material first
+export async function getStrongWords(): Promise<Flashcard[]> {
+  return enqueueProgress(async () => {
+    await ensureProgressTables();
+    const db = await initDatabase();
+    const rows = await db.getAllAsync<{ word_no: string; word_en: string }>(
+      `SELECT word_no, word_en FROM word_mastery
+       WHERE correct_count >= ?
+       ORDER BY correct_count ASC, last_seen_at ASC`,
+      [STRONG_THRESHOLD]
+    );
+    return rows.map((r) => ({ no: r.word_no, en: r.word_en }));
+  });
+}
+
+export async function getStrongWordsCount(): Promise<number> {
+  return enqueueProgress(async () => {
+    await ensureProgressTables();
+    const db = await initDatabase();
+    const row = await db.getFirstAsync<{ total: number }>(
+      'SELECT COUNT(*) as total FROM word_mastery WHERE correct_count >= ?',
+      [STRONG_THRESHOLD]
+    );
+    return row?.total ?? 0;
+  });
+}
+
+export type WordMasteryRow = {
+  no: string;
+  en: string;
+  correct_count: number;
+  wrong_count: number;
+};
+
+// Every tracked word, shakiest first — powers the Words screen lists
+export async function getAllWordMastery(): Promise<WordMasteryRow[]> {
+  return enqueueProgress(async () => {
+    await ensureProgressTables();
+    const db = await initDatabase();
+    return db.getAllAsync<WordMasteryRow>(
+      `SELECT word_no as no, word_en as en, correct_count, wrong_count
+       FROM word_mastery
+       ORDER BY correct_count ASC, wrong_count DESC, last_seen_at DESC`
+    );
   });
 }

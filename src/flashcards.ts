@@ -10,6 +10,8 @@ export type QuizQuestion = {
   answerIndex: number;
   acceptedAnswers?: string[];
   hint?: string;
+  // The word this question tests — used to record per-word mastery
+  card: Flashcard;
 };
 
 export const FLASHCARDS: Record<string, Flashcard[]> = {
@@ -253,6 +255,7 @@ export function buildQuiz(cards: Flashcard[], count: number = 5): QuizQuestion[]
       answerIndex: options.indexOf(correct),
       acceptedAnswers: [correct],
       hint,
+      card,
     };
   });
 }
