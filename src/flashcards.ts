@@ -300,3 +300,53 @@ export function buildQuizWithReview(
 
   return shuffle([...base, ...reviewQuestions]);
 }
+
+// AI-generated sentence for the lesson quiz — one per item
+export type AIQuizItem = {
+  sentence: string;
+  english: string;
+  wordsUsed: string[];
+};
+
+// Turns AI sentences into quiz questions: full-sentence multiple choice with
+// write-ins in the EN→NO direction, reusing the same QuizQuestion shape as
+// buildQuiz so the existing quiz UI, retry loop and mastery recording apply.
+export function buildAiSentenceQuiz(items: AIQuizItem[], deck: Flashcard[]): QuizQuestion[] {
+  const questions: QuizQuestion[] = [];
+  for (const item of items) {
+    const toNorwegian = Math.random() < 0.5;
+    const correct = toNorwegian ? item.sentence : item.english;
+
+    const distractorPool = shuffle(
+      items
+        .filter((o) => o !== item)
+        .map((o) => (toNorwegian ? o.sentence : o.english))
+        .filter((v) => v !== correct)
+    );
+    const distractors: string[] = [];
+    for (const v of distractorPool) {
+      if (!distractors.includes(v)) distractors.push(v);
+      if (distractors.length === 3) break;
+    }
+    if (distractors.length < 3) continue;
+
+    const options = shuffle([correct, ...distractors]);
+    const type: QuizQuestion['type'] = toNorwegian && Math.random() < 1 / 3 ? 'type' : 'choice';
+
+    const card =
+      deck.find((c) => item.sentence.toLowerCase().includes(c.no.toLowerCase())) ?? deck[0];
+
+    questions.push({
+      question: toNorwegian
+        ? `How do you say “${item.english}”?`
+        : `What does “${item.sentence}” mean?`,
+      type,
+      options,
+      answerIndex: options.indexOf(correct),
+      acceptedAnswers: [correct],
+      hint: type === 'type' ? makeHint(correct) : undefined,
+      card,
+    });
+  }
+  return shuffle(questions);
+}

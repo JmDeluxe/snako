@@ -244,3 +244,15 @@ export async function getAllWordMastery(): Promise<WordMasteryRow[]> {
     );
   });
 }
+
+// The lesson the user most recently finished — practice drills focus on its deck
+export async function getMostRecentCompletedLesson(): Promise<string | null> {
+  return enqueueProgress(async () => {
+    await ensureProgressTables();
+    const db = await initDatabase();
+    const row = await db.getFirstAsync<{ lesson_id: string }>(
+      'SELECT lesson_id FROM lesson_progress ORDER BY completed_at DESC LIMIT 1'
+    );
+    return row?.lesson_id ?? null;
+  });
+}
