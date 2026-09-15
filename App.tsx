@@ -9,13 +9,14 @@ import {
   TouchableOpacity,
   ScrollView,
   Animated,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { generateDrillSentence, checkDrillTranslation, type DrillSentence, type DrillFeedback } from './src/ai';
+import { generateDrillSentence, checkDrillTranslation, generateAiLessonQuiz, type DrillSentence, type DrillFeedback } from './src/ai';
 import { initDatabase, getSetting, saveSetting } from './src/database';
 import { CURRICULUM, getLesson, type Lesson, type Unit } from './src/curriculum';
+import { getDeck, buildQuiz, buildQuizWithReview, buildAiSentenceQuiz, matchesAnswer, XP_PER_LESSON, type Flashcard, type QuizQuestion } from './src/flashcards';
 import { getCompletedLessons, getTotalXp, getStreak, completeLesson, getLessonPosition, saveLessonPosition, recordWordResult, getStrongWords, getStrongWordsCount, getAllWordMastery, STRONG_THRESHOLD, type WordMasteryRow } from './src/progress';
-import { getDeck, buildQuiz, buildQuizWithReview, matchesAnswer, XP_PER_LESSON, type Flashcard, type QuizQuestion } from './src/flashcards';
 import { useKeyboard } from './src/hooks/useKeyboard';
 import { useTheme, type ThemeMode } from './src/hooks/useTheme';
 import { spacing, radius, type } from './src/theme';
@@ -66,6 +67,45 @@ function SettingsGlyph({ color, size = 22 }: { color: string; size?: number }) {
       <View style={{ width: dot, height: dot, borderRadius: dot / 2, backgroundColor: color }} />
       <View style={{ width: dot, height: dot, borderRadius: dot / 2, backgroundColor: color }} />
       <View style={{ width: dot, height: dot, borderRadius: dot / 2, backgroundColor: color }} />
+    </View>
+  );
+}
+
+// Messenger-style typing indicator: three dots pulsing in a wave
+function TypingDots({ color, dotSize = 8 }: { color: string; dotSize?: number }) {
+  const dots = useRef([0, 1, 2].map(() => new Animated.Value(0.3))).current;
+
+  useEffect(() => {
+    // Stagger each dot: rise, hold, fall — total loop 1.2s
+    const animations = dots.map((value, i) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.delay(i * 200),
+          Animated.timing(value, { toValue: 1, duration: 250, useNativeDriver: true }),
+          Animated.timing(value, { toValue: 0.3, duration: 250, useNativeDriver: true }),
+          Animated.delay((2 - i) * 200 + 300),
+        ])
+      )
+    );
+    animations.forEach((a) => a.start());
+    return () => animations.forEach((a) => a.stop());
+  }, [dots]);
+
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: dotSize * 0.6 }}>
+      {dots.map((value, i) => (
+        <Animated.View
+          key={i}
+          style={{
+            width: dotSize,
+            height: dotSize,
+            borderRadius: dotSize / 2,
+            backgroundColor: color,
+            opacity: value,
+            transform: [{ scale: value }],
+          }}
+        />
+      ))}
     </View>
   );
 }
@@ -140,6 +180,7 @@ export default function App() {
   const cardAnim = useRef(new Animated.Value(0)).current;
   const [quizScore, setQuizScore] = useState({ correct: 0, total: 0 });
   const [lessonResult, setLessonResult] = useState<null | { xp: number; score: number; total: number; lessonComplete: boolean; wordsLeft?: number }>(null);
+  const [aiQuizLoading, setAiQuizLoading] = useState(false);
 
   const keyboardHeight = useKeyboard();
   const flatListRef = useRef<FlatList>(null);
@@ -279,7 +320,7 @@ export default function App() {
     setQuizScore({ correct: 0, total: 0 });
   }
 
-  function toggleReveal(index: number): void {
+  const toggleReveal = (index: number): void => {
     setRevealedCards((prev) => {
       const next = new Set(prev);
       if (next.has(index)) {
@@ -291,25 +332,42 @@ export default function App() {
     });
   }
 
-  function submitAnswer(): void {
-    const question = quiz[quizIndex];
-    if (!question || answered) return;
+  // Shared reset for all quiz entry points
+  function resetQuizState(): void {
+    setQuizIndex(0);
+    setAnswered(null);
+    setSelectedOption(null);
+    setTypedAnswer('');
+    setRetryIds(new Set());
+    setQuizScore({ correct: 0, total: 0 });
+    setHintVisible(false);
+  }
 
-    if (question.type === 'type') {
-      const correct = matchesAnswer(typedAnswer, question.acceptedAnswers, question.options[question.answerIndex]);
-      setAnswered({ correct });
-      setQuizScore((prev) => ({ correct: prev.correct + (correct ? 1 : 0), total: prev.total + 1 }));
-      if (correct) {
-        recordWordResult(question.card, correct).catch(() => {});
-      }
-      return;
-    }
-
-    const correct = selectedOption === question.answerIndex;
-    setAnswered({ correct });
-    setQuizScore((prev) => ({ correct: prev.correct + (correct ? 1 : 0), total: prev.total + 1 }));
-    if (correct) {
-      recordWordResult(question.card, correct).catch(() => {});
+  // AI sentence quiz: generate sentences from this lesson, then quiz in the
+  // same UI as regular word quizzes
+  async function startAiSentenceQuiz(): Promise<void> {
+    if (!activeLessonId || aiQuizLoading) return;
+    setAiQuizLoading(true);
+    try {
+      const items = await generateAiLessonQuiz(activeLessonId);
+      const deck = getDeck(activeLessonId);
+      const questions = buildAiSentenceQuiz(items, deck);
+      if (questions.length === 0) throw new Error('no questions');
+      setIsPracticeRun(true);
+      setQuiz(questions);
+      resetQuizState();
+      setLessonResult(null);
+      setLessonPhase('quiz');
+    } catch {
+      // Generation failed — fall back to a regular deck quiz so the
+      // user still gets something
+      setIsPracticeRun(true);
+      setQuiz(buildQuiz(cards, cards.length));
+      resetQuizState();
+      setLessonResult(null);
+      setLessonPhase('quiz');
+    } finally {
+      setAiQuizLoading(false);
     }
   }
 
@@ -329,6 +387,26 @@ export default function App() {
     setSelectedOption(null);
     setTypedAnswer('');
     setHintVisible(false);
+  }
+
+  // Correct answers auto-advance after a short beat; wrong answers stay for review
+  function submitAnswer(): void {
+    const question = quiz[quizIndex];
+    if (!question || answered) return;
+
+    let correct: boolean;
+    if (question.type === 'type') {
+      correct = matchesAnswer(typedAnswer, question.acceptedAnswers, question.options[question.answerIndex]);
+    } else {
+      correct = selectedOption === question.answerIndex;
+    }
+
+    setAnswered({ correct });
+    setQuizScore((prev) => ({ correct: prev.correct + (correct ? 1 : 0), total: prev.total + 1 }));
+    if (correct) {
+      recordWordResult(question.card, correct).catch(() => {});
+      setTimeout(() => nextQuizQuestion(), 900);
+    }
   }
 
   async function finishLesson(): Promise<void> {
@@ -387,7 +465,12 @@ export default function App() {
   const [drillStreak, setDrillStreak] = useState(0);
   const [lastFeedback, setLastFeedback] = useState<DrillFeedback | null>(null);
 
+  // Ref guards so tab hopping can't fire parallel drill fetches
+  const drillFetchInFlight = useRef(false);
+
   const fetchNextDrill = async (): Promise<void> => {
+    if (drillFetchInFlight.current) return;
+    drillFetchInFlight.current = true;
     setDrillPhase('loading');
     setDrill(null);
     setLastFeedback(null);
@@ -402,6 +485,8 @@ export default function App() {
         { kind: 'error', content: 'Kunne ikke koble til Snako. (Could not reach Snako.) Tap to try again.' },
       ]);
       setDrillPhase('graded');
+    } finally {
+      drillFetchInFlight.current = false;
     }
   };
 
@@ -411,12 +496,14 @@ export default function App() {
     await fetchNextDrill();
   };
 
-  // Drill list grows as turns are added — keep the latest visible
-  useEffect(() => {
-    flatListRef.current?.scrollToEnd({ animated: true });
-  }, [drillTurns, drillPhase]);
+  // Keep the latest drill visible — including when returning to the tab,
+  // since scrollToEnd at mount fires before FlatList measures its content
+  const scrollToLatest = (): void => {
+    flatListRef.current?.scrollToEnd({ animated: false });
+  };
 
-  // Pull the first drill sentence when the practice tab opens
+  // Pull the first drill sentence when the practice tab opens — once per
+  // session; re-entering the tab mid-fetch must not fire a second request
   useEffect(() => {
     if (screen === 'practice' && drillTurns.length === 0 && drillPhase === 'loading') {
       fetchNextDrill();
@@ -665,8 +752,8 @@ export default function App() {
     const found = activeLessonId ? getLesson(activeLessonId) : undefined;
     const question = quiz[quizIndex];
     const learningCards = cards.slice(studyStart, studyStart + studyCount);
-    const totalSteps = learningCards.length + quiz.length;
-    const currentStep = learningCards.length + quizIndex;
+    const totalSteps = quiz.length;
+    const currentStep = quizIndex;
     const lessonCompleted = activeLessonId ? completedLessons.has(activeLessonId) : false;
 
     return (
@@ -761,6 +848,22 @@ export default function App() {
                     </TouchableOpacity>
                   );
                 })()}
+                <TouchableOpacity
+                  style={[styles.primaryButton, { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, marginTop: 12 }]}
+                  disabled={aiQuizLoading}
+                  onPress={startAiSentenceQuiz}
+                >
+                  <View style={styles.buttonRow}>
+                    {aiQuizLoading ? (
+                      <ActivityIndicator size="small" color={colors.text} />
+                    ) : (
+                      <>
+                        <Text style={[styles.primaryButtonText, { color: colors.text }]}>AI sentence quiz</Text>
+                        <Text style={[styles.buttonArrow, { color: colors.text }]}>›</Text>
+                      </>
+                    )}
+                  </View>
+                </TouchableOpacity>
                 <TouchableOpacity
                   style={[styles.backToSelect, { marginTop: 12 }]}
                   onPress={() => setScreen('path')}
@@ -1055,23 +1158,18 @@ export default function App() {
                   // Practice the whole deck — no XP, saved position untouched
                   setIsPracticeRun(true);
                   setQuiz(buildQuiz(cards, cards.length));
-                  setQuizIndex(0);
-                  setAnswered(null);
-                  setSelectedOption(null);
-                  setTypedAnswer('');
-                  setRetryIds(new Set());
-                  setQuizScore({ correct: 0, total: 0 });
+                  resetQuizState();
                   setLessonResult(null);
                   setLessonPhase('quiz');
                 }}
               >
-                <View style={styles.buttonRow}>
-                  <Text style={[styles.primaryButtonText, { color: colors.text }]}>
-                    Practice all words
-                  </Text>
-                  <Text style={[styles.buttonArrow, { color: colors.text }]}>›</Text>
-                </View>
-              </TouchableOpacity>
+                  <View style={styles.buttonRow}>
+                    <Text style={[styles.primaryButtonText, { color: colors.text }]}>
+                      Practice all words
+                    </Text>
+                    <Text style={[styles.buttonArrow, { color: colors.text }]}>›</Text>
+                  </View>
+                </TouchableOpacity>
             )}
             <TouchableOpacity
               style={[styles.backToSelect, { marginTop: 12 }]}
@@ -1118,7 +1216,7 @@ export default function App() {
           <Text style={[styles.headerTitle, { color: colors.text }]}>Your words</Text>
         </View>
 
-        <ScrollView style={styles.settingsBody}>
+        <ScrollView style={styles.settingsBody} contentContainerStyle={styles.bodyContent}>
           <Text style={[styles.settingsSectionTitle, { color: colors.textMuted }]}>
             Strong — you know these ({strong.length})
           </Text>
@@ -1197,7 +1295,7 @@ export default function App() {
           <Text style={[styles.headerTitle, { color: colors.text }]}>Settings</Text>
         </View>
 
-        <ScrollView style={styles.settingsBody}>
+        <ScrollView style={styles.settingsBody} contentContainerStyle={styles.bodyContent}>
           <Text style={[styles.settingsSectionTitle, { color: colors.textMuted }]}>Appearance</Text>
           <View style={[styles.themeToggleContainer, { backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1 }]}>
             {(['system', 'light', 'dark'] as ThemeMode[]).map((m) => (
@@ -1361,6 +1459,7 @@ export default function App() {
         renderItem={renderDrillTurn}
         keyExtractor={(item, idx) => `${idx}-${item.kind}`}
         contentContainerStyle={styles.messageList}
+        onContentSizeChange={scrollToLatest}
         ListFooterComponent={
           drillPhase === 'loading' || drillPhase === 'grading' ? (
             <View
@@ -1369,9 +1468,7 @@ export default function App() {
                 { backgroundColor: colors.bubbleAssistant, alignSelf: 'flex-start', borderBottomLeftRadius: radius.sm },
               ]}
             >
-              <Text style={[styles.typingIndicator, { color: colors.textMuted }]}>
-                {drillPhase === 'loading' ? 'Snako tenner en ny setning…' : 'Snako sjekker…'}
-              </Text>
+              <TypingDots color={colors.textMuted} />
             </View>
           ) : null
         }
@@ -1392,9 +1489,11 @@ export default function App() {
             styles.sendButton,
             {
               backgroundColor:
-                (!input.trim() || drillPhase === 'grading' || drillPhase === 'loading') ? colors.disabled : colors.accent,
+                (drillPhase === 'grading' || drillPhase === 'loading' || (drillPhase === 'awaiting' && !input.trim()))
+                  ? colors.disabled
+                  : colors.accent,
             },
-            (!input.trim() || drillPhase === 'grading' || drillPhase === 'loading') && { borderWidth: 1, borderColor: colors.border },
+            (drillPhase === 'grading' || drillPhase === 'loading' || (drillPhase === 'awaiting' && !input.trim())) && { borderWidth: 1, borderColor: colors.border },
           ]}
           onPress={() => {
             if (drillPhase === 'awaiting') {
@@ -1405,12 +1504,12 @@ export default function App() {
               fetchNextDrill();
             }
           }}
-          disabled={!input.trim() || drillPhase === 'grading' || drillPhase === 'loading'}
+          disabled={drillPhase === 'grading' || drillPhase === 'loading' || (drillPhase === 'awaiting' && !input.trim())}
         >
           <Text
             style={[
               styles.sendButtonText,
-              { color: (!input.trim() || drillPhase === 'grading' || drillPhase === 'loading') ? colors.textMuted : colors.bg },
+              { color: (drillPhase === 'grading' || drillPhase === 'loading' || (drillPhase === 'awaiting' && !input.trim())) ? colors.textMuted : colors.bg },
             ]}
           >
             {drillPhase === 'awaiting' ? 'Check' : 'Next'}
@@ -1538,7 +1637,7 @@ const styles = StyleSheet.create({
   // Path
   pathBody: {
     padding: spacing.base,
-    paddingBottom: 40,
+    paddingBottom: 110,
   },
   unitSection: {
     marginBottom: 24,
@@ -1612,7 +1711,7 @@ const styles = StyleSheet.create({
   },
   lessonBody: {
     padding: spacing.base,
-    paddingBottom: 40,
+    paddingBottom: 110,
   },
   selectSub: {
     fontSize: type.sm,
@@ -1739,7 +1838,13 @@ const styles = StyleSheet.create({
   // Settings
   settingsBody: {
     flex: 1,
+  },
+  // Scrolling content must carry the bottom clearance itself — padding on
+  // the ScrollView style only pads the viewport, so the tail stays hidden
+  // behind the bottom nav
+  bodyContent: {
     padding: spacing.base,
+    paddingBottom: 110,
   },
   settingsSectionTitle: {
     fontSize: type.sm,
